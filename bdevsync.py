@@ -53,9 +53,8 @@ class SpeedTransferThread(threading.Thread):
 
             # WARNING: call from another thread!
             # Race possible.
-            speed = (self.bdev._current_position - last_position )
-            self.bdev.setspeed(speed)
-
+            current_position = self.bdev._current_position
+            self.bdev.setspeed(current_position - last_position)
             last_position = current_position
 
 class Block(object):
@@ -279,7 +278,7 @@ class Protocol(object):
 
     def header_send(self, f):
         """Send json header to remote."""
-        self._write(f, self.header_sencode())
+        self._write(f, self.header_encode())
 
     def header_decode(self, json_data):
         """ json deserializer """
@@ -295,7 +294,7 @@ class Protocol(object):
             (datalen, ) = struct.unpack(self.HEADER_PACK_FMT, data)
         except struct.error, e:
             raise ProtocolReadError(
-                "Invalid packed data: %s. Data: %s" % (e, data))
+                "Invalid packed data: %s. Data: `%s'" % (e, data))
 
         data = self._read(f, datalen)
         if len(data) != datalen:
@@ -326,7 +325,7 @@ class Protocol(object):
         else:
             # Send invalid block hash to force retransmit.
             blockhash = "0"*40+"\n"
-        self._write(f, block)
+        self._write(f, blockhash)
         return blockhash
 
     def block_encode(self, block):
@@ -396,7 +395,7 @@ if __name__ == "__main__":
     local_path = args[2]
 
     if options.sender_mode:
-        sys.stderr.write("Sender mode starting.\n")
+        sys.stderr.write("Sender mode started.\n")
         sys.stderr.flush()
         bdev = ReaderBlockDevice(remote_path)
         bdev.open()
@@ -409,6 +408,7 @@ if __name__ == "__main__":
             block = bdev.read_next_block()
             if not block:
                 # End of File
+                protocol._write(sys.stderr, "EOF\n")
                 break
 
             # Transmit block hash
@@ -437,7 +437,8 @@ if __name__ == "__main__":
                 "%s@%s" % (options.ssh_user, remote_host),
                 ' '.join(remote_cmdlist)
                 ]
-
+        if options.verbose:
+            print "Remote command: %s" % (' '.join(cmd))
         ssh_pipe = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -446,14 +447,12 @@ if __name__ == "__main__":
         (remote_stdin, remote_stdout, remote_stderr) = (
                 ssh_pipe.stdin, ssh_pipe.stdout, ssh_pipe.stderr)
 
-        if read_ready(remote_stderr, 1.0):
-            print "[%s]: %s" % (remote_host, remote_stderr.readline())
+        time.sleep(1)
         if ssh_pipe.poll() is not None:
             print "Remote process crashed."
+            if read_ready(remote_stderr, 1.0):
+                print "[%s]: %s" % (remote_host, remote_stderr.readline())
             sys.exit(0)
-
-        sys.stderr.write("Writer mode.\n")
-        sys.stderr.flush()
 
         bdev = WriterBlockDevice(local_path)
         bdev.open()
@@ -506,10 +505,11 @@ if __name__ == "__main__":
 
             remote_hash = protocol.block_hash_read(remote_stdout)
             protocol.check_hash_len(remote_hash)
-            protocol.block_hash_send(remote_stdin, block)
+
+            local_hash = protocol.block_hash_send(remote_stdin, block)
 
             # We are waiting for the next block
-            if transmit_hash != remote_hash:
+            if local_hash != remote_hash:
                 remote_block = protocol.block_read(remote_stdout)
 
                 bdev.write_block(remote_block)
